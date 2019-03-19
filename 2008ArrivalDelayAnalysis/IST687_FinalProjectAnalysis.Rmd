@@ -1,0 +1,897 @@
+---
+title: "IST687_FinalProject"
+author: "Brandon Croarkin"
+date: "May 6, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, root.dir = "C:\\Users\\brcro\\OneDrive\\Documents\\Syracuse\\IST 687 - Applied Data Science\\Project\\")
+```
+
+## IST 687 - Final Project: Analysis of Airline Delays
+
+We are going to be analyzing this data from the perspective of employees at American Airlines. So, we are going to want to understand how we compare to other airlines in arrival delays, what factors cause airline delays, where we see the most airline delays, and give some insight into how we can decrease our airline delays. 
+
+```{r}
+library(readr)
+library(ggplot2)
+library(ggmap)
+library(maps)
+library(maptools)
+library(geosphere)
+library(plyr)
+library(rgdal)
+require(dplyr)
+library(fiftystater)
+library(broom)
+library(lmtest)
+library(modeest)
+library(caTools)
+library(relaimpo)
+```
+
+###Importing the Data and Basic Data Exploration
+
+Link to data: https://www.kaggle.com/giovamata/airlinedelaycauses/data
+
+```{r}
+#Importing the data (subsetting the data for now)
+df <- read_csv("DelayedFlights.csv")
+```
+
+```{r}
+colnames(df)
+```
+
+```{r}
+head(df)
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+summary(df)
+```
+
+###Data Cleaning
+
+X1 is just a duplicate column of the index so we can drop that.
+```{r}
+#setting X1 equal to NULL
+df$X1 <- NULL
+colnames(df)
+```
+
+Change the value in Month column from num to factor.
+```{r}
+#change the values from a number to the month name
+df$Month <- with(data=df,
+            ifelse((Month == 1),"January",
+            ifelse((Month == 2),"February",
+            ifelse((Month == 3),"March",
+            ifelse((Month == 4),"April",
+            ifelse((Month == 5),"May",
+            ifelse((Month == 6),"June",
+            ifelse((Month == 7),"July",
+            ifelse((Month == 8),"August",
+            ifelse((Month == 9),"September",
+            ifelse((Month == 10),"October",
+            ifelse((Month == 11),"November","December"))))))))))))
+#now make it a factor from a character
+df$Month <- as.factor(df$Month)
+```
+
+Change DayOfWeek from num to factor. 
+```{r}
+#change the values from a number to the month name
+df$DayOfWeek <- with(data=df,
+                ifelse ((DayOfWeek == 1),"Monday",
+                    ifelse((DayOfWeek == 2),"Tuesday",
+                      ifelse((DayOfWeek == 3),"Wednesday",
+                        ifelse((DayOfWeek == 4),"Thursday",
+                          ifelse((DayOfWeek == 5),"Friday",
+                            ifelse((DayOfWeek == 6),"Saturday","Sunday")))))))
+#now make it a factor from a character
+df$DayOfWeek <- as.factor(df$DayOfWeek)
+```
+
+Want to check for missing values in our most important data point (ArrDelay).
+```{r}
+sum(is.na(df$ArrDelay))
+```
+
+I want to explore these data points with missing data a little more. 
+```{r}
+head(df[is.na(df$ArrDelay)==TRUE,])
+```
+
+It looks like these fields are missing the ArrTime, so this seems like bad data. It is also a small enough number of rows so best to just remove these rows. 
+```{r}
+df_clean <- df[complete.cases(df$ArrDelay),]
+```
+
+###Feature Engineering
+
+Let's add in a variable to determine whether it is a weekend or not. We will say the weekend is from Friday through Sunday. 
+```{r}
+df_clean$Weekend <- ifelse(df_clean$DayOfWeek == "Friday" | df_clean$DayOfWeek == "Saturday" | df_clean$DayOfWeek == "SUnday",1,0)
+```
+
+Now, we can add in a column for Departure Hour so we have an hour value from DepTime.  
+```{r}
+df_clean$DepHour <- floor(df_clean$DepTime/100)
+```
+
+I want to include the airline name (not just the carrier code) so I can understand the airlines better. Airline information available here: https://openflights.org/data.html
+```{r}
+#read in airlines URL. 
+airlinesURL <- "https://raw.githubusercontent.com/jpatokal/openflights/master/data/airlines.dat"
+airlines <- read.delim(airlinesURL,header=FALSE,sep=",",stringsAsFactors = FALSE)
+```
+
+Clean airline dataset to more properly merge it with my dataset. 
+```{r}
+#change column names
+names <- c("AirlineID","Airline","Alias","UniqueCarrier","ICAO","Callsign","Country","Active")
+colnames(airlines) <- names
+#get only columns of interest
+airlines <- airlines[,c("Airline","UniqueCarrier","Country","Active")]
+#only keep rows where IATA is 2 characters
+airlines <- airlines[nchar(airlines$UniqueCarrier) == 2,]
+head(airlines)
+```
+
+Let's merge the Airline name into the dataset. 
+```{r}
+#merge dataframes to add Airline name
+df_clean <- merge(x= df_clean, y= airlines[,c("Airline","UniqueCarrier")],by = 'UniqueCarrier')
+#drop duplicate column
+df_clean$Airline.y <- NULL
+head(df_clean)
+```
+
+Also need to get airport location data so we can properly visualize where the airport delays are occuring.
+```{r}
+#read in Airport data
+airportURL <- "https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat"
+airports <- read.delim(airportURL,header=FALSE,sep=",")
+```
+
+```{r}
+#update column names
+names <- c("AirportID","Airport","City","Country","IATA","ICAO","lat","long","Altitude","Timezone","DST","Tz","Type","Source")
+colnames(airports) <- names
+```
+
+```{r}
+#Edit down list to just include airport codes and lat/long
+airports <- airports[,c(5,3,4,7,8)]
+#just want airports from the US
+airports <- airports[airports$Country == "United States",]
+#let's see this data
+head(airports)
+```
+
+###Type 1 Data Questions
+
+####What is the average length of a delay?
+
+```{r}
+#first, factor out early arrivals by changing negative numbers in $ArrDelay to 0 so that it does not falsely weigh down the average delay time.
+only_delays <-df_clean #make a copy of clean data
+
+only_delays$ArrDelay[only_delays$ArrDelay < 0] <-0
+
+#calculate central tendancies
+
+delay_mean<-round(mean(only_delays$ArrDelay[]),2)
+paste("Average length of delay with negatives included:",delay_mean,sep="")
+
+delay_mean<-round(mean(df_clean$ArrDelay),2)
+paste("Average length of delay with negatives excluded:",delay_mean,sep="")
+
+delay_median<-median(only_delays$ArrDelay)
+paste("median:",delay_median,sep="")
+
+delay_mode<-mfv(df_clean$ArrDelay) #using df_clean for mode to factor out increased population of 0
+paste("mode:",delay_mode,sep="")
+```
+It was surprising to see that the average length of delay did not change that much when computing with the original early arrival numbers. 
+
+```{r}
+#visualize the data
+ggplot(df_clean,aes(x=ArrDelay)) + geom_histogram(binwidth = 10, fill="skyblue",color="white") + xlim(-10,200) + ggtitle("Arrival Delays") + theme(plot.title = element_text(hjust = 0.5)) + geom_vline(xintercept = delay_mean, show.legend= TRUE, color="red") + geom_vline(xintercept = delay_median, show.legend= TRUE, color="blue") + geom_vline(xintercept = delay_mode, show.legend = TRUE, color="purple")
+```
+
+All in all, the average length of a delay is about 42 minutes long (red line). However, airline delays are most commonly only 10 minutes long (purple line). The median of this data set is 24 minutes (blue line). The above chart also cuts the xlim at 200 to not show some of the large outlier values. You can see the large effect of this by how spread out the mode, median, and mean lines are. 
+
+####How frequently do delays occur (for specific airlines)?
+
+```{r}
+#create new data frame with carrier and arrival delay info
+df_delays <- data.frame(only_delays$UniqueCarrier, only_delays$ArrDelay)
+names(df_delays)<-c("UniqueCarrier","ArrDelay")
+```
+
+```{r}
+#subset out any rows with 0 to eliminate flights that were not delayed
+df_delays <-df_delays[apply(df_delays[c(2)],1,function(y) !any(y==0)),]
+```
+
+```{r}
+counts<-table(df_delays$UniqueCarrier) #count the number of time an airline has a listed delay
+
+counts[order(counts)] #order frequency by least to greatest
+
+#visualize data
+#preparing bar graph by ensuring labels fit neatly
+par(las=2) #make labels perpendicular to axis
+par(mar=c(5,8,4,2))
+
+barplot(counts, main="Delay Frequency Distribution", xlab="Unique Carrier", cex.names=0.8)
+```
+Southwest Airlines delays most frequently, but there is a correlation with the amount of flights they have. American Airlines has the second most frequent delays. 
+
+Now we should continue this analysis by factoring in that different airlines have more delays and look at how often they have an arrival delay greater than the median arrival delay.
+
+```{r}
+#add variable for being larger than median arrival delay
+df_clean$OverMedian <- ifelse(df_clean$ArrDelay > delay_median, 1, 0)
+```
+
+```{r}
+#count flights by airline
+e <- df_clean %>% group_by(Airline) %>% tally() %>% arrange(desc(n))
+names(e) <- c("Airline","totalFlights")
+```
+
+```{r}
+#count delayedFlight by airline (defined as flights over the median)
+d <- df_clean %>% dplyr::select(Airline, OverMedian)
+delayedFlights <- aggregate(d$OverMedian, by=list(Category=d$Airline),FUN=sum)
+delayedFlights <- delayedFlights %>% arrange(desc(x))
+names(delayedFlights) <- c("Airline","delayedFlights")
+```
+
+```{r}
+#merge into one df
+d_merge <- merge(delayedFlights,e,by="Airline")
+```
+
+```{r}
+#find percent of flights delayed and order by percent delayed
+d_merge$percentDelayed <- round(d_merge$delayedFlights * 100 / d_merge$totalFlights,1)
+d_merge <- d_merge %>% arrange(desc(percentDelayed))
+d_merge
+```
+
+```{r}
+#add label to filter American Airlines
+d_merge$highlight <- ifelse(d_merge$Airline == "American Airlines","aa",ifelse(d_merge$Airline == "United Airlines" | d_merge$Airline == "Southwest Airlines" | d_merge$Airline == "Delta Air Lines" ,"competitor","no"))
+```
+
+```{r}
+#visualize this data
+ggplot(d_merge, aes(x=reorder(Airline,-percentDelayed),y=percentDelayed,fill=highlight)) + geom_bar(stat="identity") + ggtitle("Percent of Flights Delayed by Airline") + labs(x = "Airline", y = "Percent of Flights Delayed", subtitle = "                 Notes: A delay is defined as being larger than the median delay of 24 minutes") + theme(text = element_text(size=10),axis.text.x = element_text(angle= 45,hjust = 1),plot.title = element_text(hjust = 0.5)) + scale_fill_manual(values = c("aa"="blue","competitor" = "red","no"="grey"),guide=FALSE) + ylim(0,100)
+```
+
+####Which month has the most delays?
+
+```{r}
+#sort month in chronological order
+only_delays$Month <- factor(only_delays$Month, 
+                            levels = c("January","February","March","April","May","June",                                  "July","August","September","October","November","December"))
+
+#count delay in each month
+table(only_delays$Month)
+
+#save as data frame so we can plot a graph
+df_month <- as.data.frame(table(only_delays$Month))
+colnames(df_month) <- c("Month","Freq") #change column names
+
+#plot a line graph
+ggplot(df_month, aes(x = Month, y = Freq, group = 1)) + 
+      geom_line(color = "blue")+geom_point(color = "red", size = 2) + 
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Delays by Month") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+We can see that December has the most delays, which makes sense since it contains holidays where a lot of travel occurs and is also a cold month.
+
+Now we can repeat this analysis with American Airlines to compare. 
+
+```{r}
+df_AA <- subset(only_delays, only_delays$UniqueCarrier == "AA")
+table(df_AA$Month)
+df_AA_MonthDelay <- as.data.frame(table(df_AA$Month))
+colnames(df_AA_MonthDelay) <- c("Month","Freq") #change column names
+#plot a line graph 
+ggplot(df_AA_MonthDelay, aes(x = Month, y = Freq, group = 1)) + 
+      geom_line(color = "orange")+ geom_point(color = "darkgreen", size = 2) + 
+      geom_text(aes(label = Freq),hjust=0, vjust=0,nudge_x = -.4, nudge_y = -5,size=3.5) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("American Airlines Delays by Month") + theme(plot.title = element_text(hjust = 0.5))
+```
+AA has the most delays in June.
+
+Now that we have each graph, we can try to combine them into one graph for easy comparision. 
+
+```{r}
+df_AA <- subset(only_delays, only_delays$UniqueCarrier == "AA")
+table(df_AA$Month)
+df_AA_MonthDelay <- as.data.frame(table(df_AA$Month))
+colnames(df_AA_MonthDelay) <- c("Month","Freq") #change column names
+#plot a line graph 
+ggplot(df_AA_MonthDelay, aes(x = Month, y = Freq * 10, group = 1)) + 
+      geom_line(aes(color = "American Airlines"),size=1.5) + geom_line(data = df_month, aes(x = Month, y = Freq, group = 1, color = "Industry"), size = 1.5) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("American Airlines vs. Industry Delays by Month") + theme(plot.title = element_text(hjust = 0.5), legend.position = ) + scale_y_continuous(sec.axis = sec_axis(~ . * 1/10,name = "American Airlines")) + ylab("Industry Delays") +
+  scale_colour_manual(values=c('American Airlines'='blue', 'Industry'='red'))
+```
+
+####Which day of the week has the most delays?
+
+```{r}
+#sort month in chronological order
+only_delays$DayOfWeek <- factor(only_delays$DayOfWeek, 
+                            levels = c("Monday","Tuesday","Wednesday","Thursday",
+                                     "Friday","Saturday","Sunday"))
+
+#count delay in each month
+table(only_delays$DayOfWeek)
+
+#save as data frame so we can plot a graph
+df_dayOfWeek <- as.data.frame(table(only_delays$DayOfWeek))
+colnames(df_dayOfWeek) <- c("DayOfWeek","Freq") #change column names
+
+#plot a line graph
+ggplot(df_dayOfWeek, aes(x = DayOfWeek, y = Freq, group = 1)) + 
+      geom_line(color = "blue")+geom_point(color = "red", size = 2) + 
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))  + ggtitle("Delays by Day of the Week") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+We can see that Friday has the most delays, which again is intuitive since a lot of flights likely occur on Fridays. 
+
+Now we can repeat this analysis with American Airlines to compare. 
+
+```{r}
+#sort month in chronological order
+df_AA$DayOfWeek <- factor(df_AA$DayOfWeek, 
+                            levels = c("Monday","Tuesday","Wednesday","Thursday",
+                                     "Friday","Saturday","Sunday"))
+table(df_AA$DayOfWeek)
+df_AA_DayOfWeek <- as.data.frame(table(df_AA$DayOfWeek))
+colnames(df_AA_DayOfWeek) <- c("DayOfWeek","Freq") #change column names
+#plot a line graph 
+ggplot(df_AA_DayOfWeek, aes(x = DayOfWeek, y = Freq, group = 1)) + 
+      geom_line(color = "orange")+ geom_point(color = "darkgreen", size = 2) +   
+      geom_text(aes(label = Freq),hjust=0, vjust=0) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  ggtitle("American Airlines Delays by Day of the Week") + theme(plot.title = element_text(hjust = 0.5))
+```
+Friday has the most delay for AA, same as industry standard.
+
+Now that we have each graph, we can try to combine them into one graph for easy comparision. 
+
+```{r}
+#sort month in chronological order
+df_AA$DayOfWeek <- factor(df_AA$DayOfWeek, 
+                            levels = c("Monday","Tuesday","Wednesday","Thursday",
+                                     "Friday","Saturday","Sunday"))
+table(df_AA$DayOfWeek)
+df_AA_DayOfWeek <- as.data.frame(table(df_AA$DayOfWeek))
+colnames(df_AA_DayOfWeek) <- c("DayOfWeek","Freq") #change column names
+#plot a line graph 
+ggplot(df_AA_DayOfWeek, aes(x = DayOfWeek, y = Freq * 10, group = 1)) + 
+      geom_line(aes(color = "American Airlines"), size = 1.5) + geom_line(data = df_dayOfWeek, aes(x = DayOfWeek, y = Freq, group = 1, color = "Industry"), size = 1.5) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  ggtitle("American Airlines Delays by Day of the Week") + theme(plot.title = element_text(hjust = 0.5)) + scale_y_continuous(sec.axis = sec_axis(~ . * 1/10,name = "American Airlines")) + ylab("Industry Delays") +
+  scale_colour_manual(values=c('American Airlines'='blue', 'Industry'='red'))
+```
+
+####Which day of the month has the most delay 
+
+```{r}
+#count delay in each month
+table(only_delays$DayofMonth)
+
+#save as data frame so we can plot a graph
+df_dayOfMonth <- as.data.frame(table(only_delays$DayofMonth))
+colnames(df_dayOfMonth) <- c("DayOfMonth","Freq") #change column names
+
+#plot a line graph
+ggplot(df_dayOfMonth, aes(x = DayOfMonth, y = Freq, group = 1)) + 
+      geom_line(color = "blue")+ geom_point(color = "red", size = 2) +   ggtitle("Delays by Day of the Month") + theme(plot.title = element_text(hjust = 0.5))
+```
+ 
+Interestingly, the 22nd has the most delays, but there does not seem to be any trend across the month. 
+
+####What Airline experiences the longest delays?
+
+```{r}
+#want to see how many flights each carrier has
+a <- table(df_clean$Airline)
+b <- as.data.frame(a)
+colnames(b)[1] <- "Airline"
+colnames(b)[2] <- "Flights"
+b$percentTotal <- round(b$Flights/sum(b$Flights),digits=4)*100
+b[order(-b$Flights),]
+```
+
+We can see that WN (Southwest Airlines Co.) has the most flights (19.5% of tota). In tallying delay frequencies, we should make sure to account for them having more total flights than other airlines. 
+
+```{r}
+c <- tapply(df_clean$ArrDelay,df_clean$UniqueCarrier,mean)
+avgDelay <- mean(df_clean$ArrDelay)
+avgDelayCarrier <- as.data.frame(as.table(c))
+colnames(avgDelayCarrier)[1] <- "Airline"
+colnames(avgDelayCarrier)[2] <- "avgAirlineDelay"
+avgDelayCarrier$overallAvgDelay <- avgDelay
+avgDelayCarrier$diffFromAvg <- avgDelayCarrier$avgAirlineDelay - avgDelayCarrier$overallAvgDelay
+avgDelayCarrier <- avgDelayCarrier[order(-avgDelayCarrier$avgAirlineDelay),]
+rownames(avgDelayCarrier) <- NULL
+avgDelayCarrier
+```
+
+From this, it appears that YV (Mesa Airlines, Inc.) has the longest avgDelay at 55.29 minutes. The airline with the longest delays was AQ (9 Air Co Ltd) that had the shortest delays at 21.26 minutes. 
+
+```{r}
+ggplot(avgDelayCarrier,aes(x=Airline,y=diffFromAvg)) + geom_bar(aes(fill=diffFromAvg),color="black",stat="identity") + scale_fill_gradient2(low = "blue",high="red") + ggtitle("Airline Average Delays compared to the Mean") + theme(plot.title = element_text(hjust = 0.5)) + ylab("Difference from Average Delay Time (in minutes)")
+```
+
+####Which airport/city experiences the most/longest delays?
+
+First we need to create the dataset to work with. 
+
+```{r}
+#get just the columns we need from the dataframe
+airportDelays <- df_clean[,c("UniqueCarrier","ArrDelay","Origin","Dest")]
+head(airportDelays)
+```
+
+```{r}
+#merge this data with df for Dest
+airportDelays_final <- merge(airportDelays, airports, by.x = 'Dest', by.y = 'IATA', suffix = 'Dest')
+#change names to differentiate Origin and Dest
+names(airportDelays_final)[names(airportDelays_final)=="lat"] <- "latDest"
+names(airportDelays_final)[names(airportDelays_final)=="long"] <- "lonDest"
+#merge this data with df for Origin
+airportDelays_final <- merge(airportDelays_final, airports, by.x = 'Origin', by.y = 'IATA',suffix = 'Origin')
+names(airportDelays_final)[names(airportDelays_final)=="lat"] <- "latOrigin"
+names(airportDelays_final)[names(airportDelays_final)=="long"] <- "lonOrigin"
+#examine dataframe
+head(airportDelays_final)
+```
+
+```{r}
+#pick columns from above that we actually need
+airportDelays_clean2 <-  airportDelays_final[,c("UniqueCarrier","Origin","latOrigin","lonOrigin","Dest","latDest","lonDest","ArrDelay")]
+head(airportDelays_clean2)
+```
+
+```{r}
+#get the count of flights and average arrival delay by origin airport
+
+#just need the CityOrigin
+airportDelays_Origin2 <- airportDelays_clean2[,c("Origin","latOrigin","lonOrigin","ArrDelay")]
+
+#group by airport (average ArrDelay)
+airportDelays_OriginDelay <- airportDelays_Origin2 %>% 
+  group_by(Origin,latOrigin,lonOrigin) %>%
+  summarise(avgArrDelay = mean(ArrDelay))
+
+#group by airport (trip count)
+airportDelays_OriginCount2 <- airportDelays_Origin2 %>% 
+  dplyr::select(Origin) %>%
+  group_by(Origin) %>%
+  tally()
+
+#combine two dataframe
+airportOriginDelays2 <- merge(airportDelays_OriginDelay,airportDelays_OriginCount2,by="Origin")
+
+head(airportOriginDelays2)
+```
+
+```{r}
+#get the count of flights and average arrival delay by origin airport for just American Airlines
+
+#filter for just American Airlines
+aa_airportDelays <- airportDelays_clean2 %>% 
+  filter(UniqueCarrier == "AA")
+
+#just need the Origin
+aa_airportDelays <- aa_airportDelays[,c("Origin","latOrigin","lonOrigin","ArrDelay")]
+
+#group by city (average ArrDelay)
+aa_airportOriginDelays <- aa_airportDelays %>% 
+  group_by(Origin,latOrigin,lonOrigin) %>%
+  summarise(avgArrDelay = mean(ArrDelay))
+
+#group by city (trip count)
+aa_airportOriginCount <- aa_airportDelays %>% 
+  dplyr::select(Origin) %>%
+  group_by(Origin) %>%
+  tally()
+
+#combine two dataframe
+aa_airportDelays <- merge(aa_airportOriginDelays,aa_airportOriginCount,by="Origin")
+
+head(aa_airportDelays)
+```
+
+First need to create the map of the US.
+```{r}
+#get worldmap
+map("world")
+```
+
+```{r}
+#set xlim and ylim to focus on US
+xlim <- c(-171.738281, -56.601563)
+ylim <- c(12.039321, 71.856229)
+us <- map_data("world",xlim=xlim, ylim=ylim)
+```
+
+
+```{r}
+airportDelayMap <- ggplot() + geom_polygon(data = us, aes(x=long, y = lat, group = group)) + theme_dark()
+airportDelayMap
+```
+
+Now we can add the airports to the map!
+```{r}
+airportDelayMap + geom_point(data = airportOriginDelays2,aes(x = lonOrigin,y = latOrigin,size=n,color=avgArrDelay),alpha=.8) + scale_color_gradient(low = "#ffffff", high="#d30606") + ggtitle("Airport Delays")  + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Let's try a different visual for this data. A bar plot. 
+```{r}
+#order dataframe and take just the 20 worst
+df20WAirports <- airportOriginDelays2[order(-airportOriginDelays2$avgArrDelay),]
+df20WAirports <- head(df20WAirports, 20)
+head(df20WAirports)
+```
+
+```{r}
+#order dataframe and take just the 20 best
+df20BAirports <- airportOriginDelays2[order(airportOriginDelays2$avgArrDelay),]
+df20BAirports <- head(df20BAirports, 20)
+rownames(df20BAirports) <- NULL
+head(df20BAirports)
+```
+
+```{r}
+#graph the 20 worst airports
+ggplot(data = df20WAirports,aes(x = reorder(Origin,avgArrDelay),y = avgArrDelay)) + geom_bar(stat="identity",aes(fill=n)) + geom_hline(yintercept = 42.78,color="red",size=1) + xlab("Origin Airport") + ylab("Average Arrival Delay (in minutes)") + coord_flip() + ggtitle("Average Arrival Delays by Airport (Worst 20)") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#graph the 20 best airports
+ggplot(data = df20BAirports,aes(reorder(Origin,-avgArrDelay),avgArrDelay)) + geom_bar(stat="identity",aes(fill=n)) + geom_hline(yintercept = 42.78,color="red",size=1) + xlab("Origin Airport") + ylab("Average Arrival Delay (in minutes)") + coord_flip() + ggtitle("Average Arrival Delays by Airport (Best 20)") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Repeat steps from above with just American Airlines.
+
+```{r}
+#order dataframe and take just the 20 worst
+aa20WAirports <- aa_airportDelays[order(-aa_airportDelays$avgArrDelay),]
+aa20WAirports <- head(aa20WAirports, 20)
+head(aa20WAirports)
+```
+
+```{r}
+#order dataframe and take just the 20 best
+aa20BAirports <- aa_airportDelays[order(aa_airportDelays$avgArrDelay),]
+aa20BAirports <- head(aa20BAirports, 20)
+head(aa20BAirports)
+```
+
+```{r}
+#graph the 20 worst airports
+ggplot(data = aa20WAirports,aes(x = reorder(Origin,avgArrDelay),y = avgArrDelay)) + geom_bar(stat="identity",aes(fill=n)) + geom_hline(yintercept = 42.78,color="red",size=1) + xlab("Origin Airport") + ylab("Average Arrival Delay (in minutes)") + coord_flip() + ggtitle("American Airlines Avg ArrDelay by Airport (Worst 20)") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#graph the 20 best airports
+ggplot(data = aa20BAirports,aes(reorder(Origin,-avgArrDelay),avgArrDelay)) + geom_bar(stat="identity",aes(fill=n)) + geom_hline(yintercept = 42.78,color="red",size=1) + xlab("Origin Airport") + ylab("Average Arrival Delay (in minutes)") + coord_flip() + ggtitle("American Airlines Avg ArrDelay by Airport (Best 20)") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+###Type 2 Data Questions
+
+####Predict the length and/or probability of a delay
+
+Now that we have explored the dataset and understand the data better, we can begin trying predict the delays and cancellations that occur in the dataset.
+
+```{r}
+#change UniqueCarrier, Origin, ad Dest to factors for regression analysis
+df_clean$UniqueCarrier <- as.factor(df_clean$UniqueCarrier)
+df_clean$Origin <- as.factor(df_clean$Origin)
+df_clean$Dest <- as.factor(df_clean$Dest)
+```
+
+To limit the number of Airports in the models, I am going to remove airports that have less than 10,000 flights in the year. 
+
+```{r}
+#find airports with more than 10,000 origin flights in a year
+dummy <- df_clean %>% group_by(Origin) %>% filter(n() > 10000)
+```
+
+```{r}
+#split into training and test
+sample <- sample.split(dummy,SplitRatio = .7)
+train <- subset(dummy, sample == TRUE)
+test <- subset(dummy, sample == FALSE)
+```
+
+Here are all the variables that I think may be related to delays based on our initial EDA and intuitions (Month, Weekend, DepHour, UniqueCarrier, Origin, and Distance).
+
+Let's start with a more basic model to just explore some of these assumptions. 
+
+```{r}
+model1 <- lm(data = dummy, formula = ArrDelay ~ UniqueCarrier + Distance)
+summary(model1)
+```
+
+```{r}
+#let's add some more variables to the model
+model2 <- lm(data = df_clean, formula = ArrDelay ~ UniqueCarrier + Distance + Weekend + Month + DepHour)
+summary(model2)
+```
+
+```{r}
+#find the relative importance of the variables
+relImportance <- calc.relimp(model2, type = "lmg", rela = TRUE)
+sort(relImportance$lmg, decreasing = TRUE)
+```
+
+Now that we have the industry relative importance, next we are going to repeat this for American Airlines and then for the competitors. 
+
+```{r}
+aa <- df_clean %>% filter(UniqueCarrier == "AA")
+head(aa)
+#let's add some more variables to the model
+aa.model2 <- lm(data = aa, formula = ArrDelay ~ Distance + Weekend + Month + DepHour)
+summary(aa.model2)
+```
+
+```{r}
+#find the relative importance of the variables
+relImportance <- calc.relimp(aa.model2, type = "lmg", rela = TRUE)
+sort(relImportance$lmg, decreasing = TRUE)
+```
+
+```{r}
+comp <- df_clean %>% filter(UniqueCarrier == "WN" | UniqueCarrier == "DL" | UniqueCarrier == "UA")
+head(aa)
+#let's add some more variables to the model
+comp.model2 <- lm(data = aa, formula = ArrDelay ~ Distance + Weekend + Month + DepHour)
+summary(comp.model2)
+```
+
+```{r}
+#find the relative importance of the variables
+relImportance <- calc.relimp(comp.model2, type = "lmg", rela = TRUE)
+sort(relImportance$lmg, decreasing = TRUE)
+```
+
+```{r}
+model3 <- lm(data = df_clean, formula = ArrDelay ~ UniqueCarrier + Distance + DayOfWeek + DepTime)
+summary(model3)
+```
+
+```{r}
+model4 <- lm(data = train, formula = ArrDelay ~ UniqueCarrier + Distance + Weekend + DepHour + Origin)
+summary(model4)
+```
+
+Diagnostic Tests
+
+Let's make a residual plot with ggplot
+
+```{r}
+residuals <- augment(model3)
+ggplot(residuals, aes(x = .fitted, y = .resid)) + geom_point(alpha=.2) + geom_smooth(color = "red")
+```
+
+
+```{r}
+# visualize residuals and fitted values.
+plot(model3, pch=16, which=1)
+```
+
+```{r}
+#RESET test for non-linearity
+resettest(model3, power=2:3, type="regressor", data = df_clean)
+```
+
+Since the p-value is low, there is a high probability that our data is non-linear. This is likely due to the outliers in the data. Perhaps a log of ArrDelay would be better. 
+
+However, since we have negative numbers we need to adjust for this. I think the easiest way to do this is to shift the data up by the maximum negative value + 1. This will allow us to do a log transformation on all the data. When interpreting the results we will need to remember to shift the intercept down. 
+
+```{r}
+#how many of our rows are below 0
+nrow(df_clean[df_clean$ArrDelay<0,])/nrow(df_clean)
+```
+
+```{r}
+min(df_clean$ArrDelay)
+```
+
+```{r}
+#create logArrDelay. Adding the 109 to account for negative values.
+df_clean$logArrDelay <- log(df_clean$ArrDelay + 109)
+#make sure there are no NA's
+df_clean_log <- df_clean[complete.cases(df_clean$logArrDelay),]
+#remove any values with -Inf
+df_clean_log <- df_clean[df_clean$logArrDelay!=-Inf,]
+summary(df_clean_log$logArrDelay)
+```
+
+```{r}
+model5 <- lm(data = df_clean_log, formula = logArrDelay ~ UniqueCarrier + Origin + Distance + DayOfWeek + DepTime + Month)
+summary(model5)
+```
+
+```{r}
+#RESET test for non-linearity
+resettest(model4, power=2:3, type="regressor", data = df_clean)
+```
+
+It seems that predicting the length of the arrival delay is pretty hard to do, so it seems better to predict whether there will be a delay or not with our OverMedian variable we created. 
+```{r}
+logmodel1 <- glm(OverMedian ~ Weekend + Origin + DepHour + Distance + Airline, data = test, family = binomial)
+summary(logmodel1)
+```
+
+```{r}
+#predict "testData" with logmodel1
+logPred1 <- predict(logmodel1, test, type = "response")
+log.predictions = ifelse(logPred1 > 0.5, "1","0")
+table(log.predictions, test$OverMedian)
+```
+
+```{r}
+mean(log.predictions == test$OverMedian)
+```
+
+We have a classification rate of 59%, which is not great.
+
+
+
+
+
+
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+ 
+```
+
+###What is the impact of each "cause of delay"?
+
+TYPE 2 Question: What are the impacts of each cause airline delays?
+```{r}
+Total_CarrierDelay <- sum(df_clean$CarrierDelay, na.rm=TRUE)
+print(paste ("Carrier caused a total of", Total_CarrierDelay, "minutes in delay"))
+Mean_CarrierDelay <- mean(df_clean$CarrierDelay, na.rm=TRUE)
+print(paste ("Carrier caused an average of", Mean_CarrierDelay, "minutes in delay"))
+
+Total_WeatherDelay <- sum(df_clean$WeatherDelay, na.rm=TRUE)
+print(paste ("Weather caused a total of", Total_WeatherDelay, "minutes in delay"))
+Mean_WeatherDelay <- mean(df_clean$WeatherDelay, na.rm=TRUE)
+print(paste ("Weather caused an average of", Mean_WeatherDelay, "minutes in delay"))
+
+Total_NASDelay <- sum(df_clean$NASDelay, na.rm=TRUE)
+print(paste ("NAS caused a total of", Total_NASDelay, "minutes in delay"))
+Mean_NASDelay <- mean(df_clean$NASDelay, na.rm=TRUE)
+print(paste ("NAS caused an average of", Mean_NASDelay, "minutes in delay"))
+
+Total_SecDelay <-sum(df_clean$SecurityDelay, na.rm=TRUE)
+print(paste ("Security issues caused a total of", Total_SecDelay, "minutes in delay"))
+Mean_SecDelay <-mean(df_clean$SecurityDelay, na.rm=TRUE)
+print(paste ("Security issues caused an average of", Mean_SecDelay, "minutes in delay"))
+
+Total_LateDelay <- sum(df_clean$LateAircraftDelay, na.rm=TRUE)
+print(paste ("Late arrivals caused a total of", Total_LateDelay, "minutes in delay"))
+Mean_LateDelay <- mean(df_clean$LateAircraftDelay, na.rm=TRUE)
+print(paste ("Late arrivals caused an average of", Mean_LateDelay, "minutes in delay"))
+```
+
+Late arrivals cause the most amount of delays in minutes and therefore is the biggest industry standard issue. It causes an average of 25 minutes per delay. 
+
+```{r}
+#create a dataframe filtered with only American Airlines data
+AA_only <-df_clean[df_clean$UniqueCarrier=='AA',]
+head(AA_only)
+```
+
+Find out which delay causes most delay minutes for AA
+
+```{r}
+AA_CarrierDelay <- sum(AA_only$CarrierDelay, na.rm=TRUE)
+print(paste ("Carrier caused a total of", AA_CarrierDelay, "minutes in delay"))
+Mean_AA_CarrierDelay <- mean(AA_only$CarrierDelay, na.rm=TRUE)
+print(paste ("Carrier caused an average of", Mean_AA_CarrierDelay, "minutes in delay"))
+
+AA_WeatherDelay <- sum(AA_only$WeatherDelay, na.rm=TRUE)
+print(paste ("Weather caused a total of", AA_WeatherDelay, "minutes in delay"))
+Mean_AA_WeatherDelay <- mean(AA_only$WeatherDelay, na.rm=TRUE)
+print(paste ("Weather caused an average of", Mean_AA_WeatherDelay, "minutes in delay"))
+
+
+AA_NASDelay <- sum(AA_only$NASDelay, na.rm=TRUE)
+print(paste ("NAS caused a total of", AA_NASDelay, "minutes in delay"))
+Mean_AA_NASDelay <- mean(AA_only$NASDelay, na.rm=TRUE)
+print(paste ("NAS caused an average of", Mean_AA_NASDelay, "minutes in delay"))
+
+AA_SecDelay <-sum(AA_only$SecurityDelay, na.rm=TRUE)
+print(paste ("Security issues caused a total of", AA_SecDelay, "minutes in delay"))
+Mean_AA_SecDelay <-mean(AA_only$SecurityDelay, na.rm=TRUE)
+print(paste ("Security issues caused an average of", Mean_AA_SecDelay, "minutes in delay"))
+
+AA_LateDelay <- sum(AA_only$LateAircraftDelay, na.rm=TRUE)
+print(paste ("Late arrivals caused a total of", AA_LateDelay, "minutes in delay"))
+Mean_AA_LateDelay <- mean(AA_only$LateAircraftDelay, na.rm=TRUE)
+print(paste ("Late arrivals caused an average of", Mean_AA_LateDelay, "minutes in delay"))
+```
+
+Late arrivals caused the most amount of delays in minutes for AA, which is consistent with industry standard.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

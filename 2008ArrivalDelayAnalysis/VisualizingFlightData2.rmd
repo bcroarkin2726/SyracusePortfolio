@@ -1,0 +1,200 @@
+---
+title: "VisualizingFlights2"
+author: "Brandon Croarkin"
+date: "June 5, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Visualizing Flight Data
+
+```{r}
+library(maps)
+library(geosphere)
+library(readr)
+library(dplyr)
+```
+
+####Importing and Formatting Flight Data
+
+Importing in the flight data.
+```{r}
+#Importing the data (subsetting the data for now)
+setwd("C:\\Users\\brcro\\OneDrive\\Documents\\Syracuse\\IST 687 - Applied Data Science\\Project\\ProjectData")
+flights <- read_csv("DelayedFlights.csv")
+```
+
+```{r}
+#X1 is just a duplicate column of the index so we can drop that
+flights$X1 <- NULL
+```
+
+```{r}
+head(flights) 
+```
+
+Need to cut down the flights dataframe to just be the count of flights between airports. 
+
+```{r}
+#reduce dataset to just the columns I need
+flights <- flights[,c("UniqueCarrier","Origin","Dest")]
+head(flights)
+```
+
+```{r}
+#get the count for each trip
+flights <- flights %>% group_by(UniqueCarrier,Origin,Dest) %>% tally()
+names <- c("airline","airport1","airport2","cnt")
+colnames(flights) <- names
+head(flights)
+```
+
+Also need to get airport location data.
+```{r}
+airportURL <- "https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat"
+airports <- read.delim(airportURL,header=FALSE,sep=",")
+names <- c("AirportID","Airport","City","Country","iata","ICAO","lat","long","Altitude","Timezone","DST","Tz","Type","Source")
+colnames(airports) <- names
+```
+
+```{r}
+#Edit down list to just include airport codes and lat/long
+airports <- airports[,c(5,7,8)]
+head(airports)
+```
+
+####Draw Maps
+
+Create base maps first. 
+
+```{r}
+#get worldmap
+map("world")
+```
+
+```{r}
+xlim <- c(-171.738281, -56.601563)
+ylim <- c(12.039321, 71.856229)
+map("world", col="#f2f2f2", fill=TRUE, bg="white", lwd=0.01,lty=0,xlim=xlim, ylim=ylim)
+```
+
+####Draw Lines
+
+Example
+```{r}
+map("world", col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,lty=0,xlim=xlim, ylim=ylim)
+#draw a great circle arc from California to Maine
+lat_ca <- 39.164141
+lon_ca <- -121.640625
+lat_me <- 45.213004
+lon_me <- -68.906250
+inter <- gcIntermediate(c(lon_ca, lat_ca), c(lon_me, lat_me), n=50, addStartEnd=TRUE)
+lines(inter,col="red")
+```
+
+```{r}
+map("world", col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,lty=0,xlim=xlim, ylim=ylim)
+#draw a great circle arc from California to Maine
+lat_ca <- 39.164141
+lon_ca <- -121.640625
+lat_me <- 45.213004
+lon_me <- -68.906250
+inter <- gcIntermediate(c(lon_ca, lat_ca), c(lon_me, lat_me), n=50, addStartEnd=TRUE)
+lines(inter,col="red")
+#add a line from California to Texas
+lat_tx <- 29.954935
+lon_tx <- -98.701172
+inter2 <- gcIntermediate(c(lon_ca, lat_ca), c(lon_tx, lat_tx), n=50, addStartEnd=TRUE)
+lines(inter2, col="red")
+```
+
+####Draw flight connections
+
+Let's draw the flight connections for one airline. 
+```{r}
+map("world", col="#f2f2f2", fill=TRUE, bg="white",lty=0,xlim=xlim, ylim=ylim)
+ 
+fsub <- flights[flights$airline == "UA",]
+for (j in 1:length(fsub$airline)) {
+    air1 <- airports[airports$iata == fsub[j,]$airport1,]
+    air2 <- airports[airports$iata == fsub[j,]$airport2,]
+     
+    inter <- gcIntermediate(c(air1[1,]$long, air1[1,]$lat), c(air2[1,]$long, air2[1,]$lat), n=100, addStartEnd=TRUE)
+             
+    lines(inter, col="black", lwd = .8, lty = 1)
+}
+```
+
+Let's add some color. 
+```{r}
+pal <- colorRampPalette(c("#f2f2f2", "black"))
+colors <- pal(100)
+ 
+map("world", col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,lty=0,xlim=xlim, ylim=ylim)
+ 
+fsub <- flights[flights$airline == "UA",]
+maxcnt <- max(fsub$cnt)
+for (j in 1:length(fsub$airline)) {
+    air1 <- airports[airports$iata == fsub[j,]$airport1,]
+    air2 <- airports[airports$iata == fsub[j,]$airport2,]
+     
+    inter <- gcIntermediate(c(air1[1,]$long, air1[1,]$lat), c(air2[1,]$long, air2[1,]$lat), n=100, addStartEnd=TRUE)
+    colindex <- round( (fsub[j,]$cnt / maxcnt) * length(colors) )
+             
+    lines(inter, col=colors[colindex], lwd=0.8)
+}
+
+```
+
+Need to order connections from least to greatest flight counts in order to properly layer dark on top of light.
+```{r}
+pal <- colorRampPalette(c("#f2f2f2", "red"))
+colors <- pal(100)
+ 
+map("world", col="#191919", fill=TRUE, bg="#000000", lwd=0.05,lty=0,xlim=xlim, ylim=ylim)
+title(main = "Test",col="white")
+ 
+fsub <- flights[flights$airline == "UA",]
+fsub <- fsub[order(fsub$cnt),]
+maxcnt <- max(fsub$cnt)
+for (j in 1:length(fsub$airline)) {
+    air1 <- airports[airports$iata == fsub[j,]$airport1,]
+    air2 <- airports[airports$iata == fsub[j,]$airport2,]
+    inter <- gcIntermediate(c(air1[1,]$long, air1[1,]$lat), c(air2[1,]$long, air2[1,]$lat), n=100, addStartEnd=TRUE)
+    colindex <- round( (fsub[j,]$cnt / maxcnt) * length(colors) )
+    lines(inter, col=colors[colindex], lwd=0.2)
+}
+```
+
+Now that we have tested the functionality with one carrier, we can expand to include other carriers as well. The below feature, exports the data to a pdf file for each airline. 
+```{r}
+# Unique carriers
+carriers <- unique(flights$airline)
+ 
+# Color
+pal <- colorRampPalette(c("#333333", "white", "#1292db"))
+colors <- pal(100)
+ 
+for (i in 1:length(carriers)) {
+     
+    pdf(paste("carrier", carriers[i], ".pdf", sep=""), width=11, height=7)
+    map("world", col="#191919", fill=TRUE, bg="#000000", lwd=0.05,lty=0,xlim=xlim, ylim=ylim)
+    fsub <- flights[flights$airline == carriers[i],]
+    fsub <- fsub[order(fsub$cnt),]
+    maxcnt <- max(fsub$cnt)
+    for (j in 1:length(fsub$airline)) {
+        air1 <- airports[airports$iata == fsub[j,]$airport1,]
+        air2 <- airports[airports$iata == fsub[j,]$airport2,]
+         
+        inter <- gcIntermediate(c(air1[1,]$long, air1[1,]$lat), c(air2[1,]$long, air2[1,]$lat), n=100, addStartEnd=TRUE)
+        colindex <- round( (fsub[j,]$cnt / maxcnt) * length(colors) )
+                 
+        lines(inter, col=colors[colindex], lwd=0.6)
+    }
+     
+    dev.off()
+}
+```
