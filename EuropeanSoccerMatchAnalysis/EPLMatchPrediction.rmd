@@ -1,0 +1,1095 @@
+---
+title: "EPLSoccer"
+author: "Brandon Croarkin"
+date: "August 15, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## EPL Soccer Analysis
+
+```{r}
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(cowplot)
+library(ggfortify)
+library(tidyr)
+library(zoo)
+library(randomForest)
+library(caret)
+library(arules)
+library(arulesViz)
+library(caTools)
+library(corrplot)
+library(kernlab)
+library(e1071)
+set.seed(11)
+```
+
+##Read in Data
+
+```{r}
+con = dbConnect(drv=RSQLite::SQLite(), dbname="database.sqlite")
+```
+
+```{r}
+dbListTables(con)
+```
+
+```{r}
+Country <- dbGetQuery(con, 'select * from Country')
+Match <- dbGetQuery(con, 'select * from Match')
+League <- dbGetQuery(con, 'select * from League')
+Player <- dbGetQuery(con, 'select * from Player')
+Player_Attributes <- dbGetQuery(con, 'select * from Player_Attributes')
+Team <- dbGetQuery(con, 'select * from Team')
+Team_Attributes <- dbGetQuery(con, 'select * from Team_Attributes')
+sqlite_sequence <- dbGetQuery(con, 'select * from sqlite_sequence')
+```
+
+```{r}
+summary(Match)
+```
+
+```{r}
+Country
+```
+
+```{r}
+League
+```
+
+###Data PreProcessing
+
+Make players table.
+```{r}
+#combine player and player attributes tables
+Player2 <- merge(x = Player_Attributes, y = Player, by = "player_api_id")
+#drop unneeded id columns
+Player2 <- Player2[-c(2:3,43,45)]
+#change date and birthday to date types
+Player2$date <- as.Date(Player2$date)
+Player2$birthday <- as.Date(Player2$birthday)
+#create an age columns
+Player2$age <- round(as.numeric(difftime(Player2$date, Player2$birthday, units = "weeks")/52.25))
+#change datatypes of the player_id's to characters
+Player2$player_api_id <- as.character(Player2$player_api_id)
+#create a year column from date
+Player2$Year <- format(as.Date(Player2$date, format="%d/%m/%Y"),"%Y")
+#remove duplicate rows based on player_name and Year
+Player2 <- Player2[!duplicated(Player2[c(2,3)]),]
+#make a unique id column that merges player id with year
+Player2$ID <- paste(Player2$player_api_id, Player2$Year, sep = "-") 
+#re-order columns
+player_cols <- c("ID", "player_api_id","player_name","Year","date","birthday","age","height","weight","overall_rating","potential","preferred_foot","attacking_work_rate","defensive_work_rate", "crossing", "finishing","heading_accuracy","short_passing","volleys","dribbling","curve","free_kick_accuracy","long_passing","ball_control","acceleration","sprint_speed","agility","reactions","balance","shot_power","jumping","stamina","strength","long_shots","aggression","interceptions","positioning","vision","penalties","marking","standing_tackle","sliding_tackle","gk_diving","gk_handling","gk_kicking","gk_positioning","gk_reflexes")
+Player2 <- Player2[,player_cols]
+#view head of table
+head(Player2)
+```
+
+```{r}
+#make a df with the average rating for each player
+Player3 <- Player2 %>% select(player_api_id, player_name, overall_rating) %>% group_by(player_api_id, player_name) %>% summarise(rating = round(mean(overall_rating),1)) %>% top_n(10)
+#check how many unique players there are to make sure new dataframe is correct
+length(unique(Player2$player_api_id))
+```
+
+Create matches table to track results and players involved in the game.
+```{r}
+#merge with Country table to get country name
+Matches2 <- merge(x = Country, y = Match, by.x = "id", by.y = "country_id")
+#merge with League table to get league name
+Matches2 <- merge(x = League, y = Matches2, by.x = "id", by.y = "league_id")
+#filter team table to just id and long team name
+Team2 <- Team %>% select(team_api_id, team_long_name)
+#merge with Team2 table to get home team name
+Matches2 <- merge(x = Team2, y = Matches2, by.x = "team_api_id", by.y = "home_team_api_id")
+Matches2 <- Matches2 %>% rename(Home_Team = team_long_name)
+#merge with Team2 table to get away team name
+Matches2 <- merge(x = Team2, y = Matches2, by.x = "team_api_id", by.y = "away_team_api_id")
+#drop unneeded id columns
+Matches2 <- Matches2[-c(1,3,5,6,8,10)]
+#rename columns
+Matches2 <- Matches2 %>% rename(Away_Team = team_long_name, League = name.x, Country = name.y)
+#change datatypes of the player_id's to characters
+Matches2$home_player_1 <- as.character(Matches2$home_player_1)
+Matches2$home_player_2 <- as.character(Matches2$home_player_2)
+Matches2$home_player_3 <- as.character(Matches2$home_player_3)
+Matches2$home_player_4 <- as.character(Matches2$home_player_4)
+Matches2$home_player_5 <- as.character(Matches2$home_player_5)
+Matches2$home_player_6 <- as.character(Matches2$home_player_6)
+Matches2$home_player_7 <- as.character(Matches2$home_player_7)
+Matches2$home_player_8 <- as.character(Matches2$home_player_8)
+Matches2$home_player_9 <- as.character(Matches2$home_player_9)
+Matches2$home_player_10 <- as.character(Matches2$home_player_10)
+Matches2$home_player_11 <- as.character(Matches2$home_player_11)
+Matches2$away_player_1 <- as.character(Matches2$away_player_1)
+Matches2$away_player_2 <- as.character(Matches2$away_player_2)
+Matches2$away_player_3 <- as.character(Matches2$away_player_3)
+Matches2$away_player_4 <- as.character(Matches2$away_player_4)
+Matches2$away_player_5 <- as.character(Matches2$away_player_5)
+Matches2$away_player_6 <- as.character(Matches2$away_player_6)
+Matches2$away_player_7 <- as.character(Matches2$away_player_7)
+Matches2$away_player_8 <- as.character(Matches2$away_player_8)
+Matches2$away_player_9 <- as.character(Matches2$away_player_9)
+Matches2$away_player_10 <- as.character(Matches2$away_player_10)
+Matches2$away_player_11 <- as.character(Matches2$away_player_11)
+#drop unneeded columns 
+Matches2 <- Matches2[-c(77:115)]
+#add a column result (will be for the home team)
+Matches2$Result <- ifelse(Matches2$home_team_goal > Matches2$away_team_goal, "W",
+                          ifelse(Matches2$home_team_goal < Matches2$away_team_goal, "L", 
+                                 ifelse(Matches2$home_team_goal == Matches2$away_team_goal, "T", "NA")))
+#convert date to a date variable
+Matches2$date <- as.Date(Matches2$date)
+#create a year column from date
+Matches2$Year <- format(as.Date(Matches2$date, format="%d/%m/%Y"),"%Y")
+#create a unique ID column that merges player 
+Matches2$ID <- paste(Matches2$home_player_1, Matches2$Year, sep = "-")
+                                 
+head(Matches2)
+```
+
+```{r}
+#filter to just the 5 leagues I am interested in
+leagues <- c("England Premier League", "France Ligue 1", "Spain LIGA BBVA", "Germany 1. Bundesliga","Italy Serie A")
+Matches2 <- Matches2 %>% filter(League %in% leagues)
+```
+
+```{r}
+#set Matches3 equal to Matches2 to start
+Matches3 <- Matches2
+#create player_list for the different positions
+player_list <- c("home_player_1", "home_player_2", "home_player_3", "home_player_4", "home_player_5", "home_player_6","home_player_7","home_player_8","home_player_9","home_player_10","home_player_11","away_player_1","away_player_2","away_player_3","away_player_4","away_player_5","away_player_6","away_player_7","away_player_8","away_player_9","away_player_10", "away_player_11")
+#loop through the different positions and merge with player name and rating
+for (i in 1:length(player_list)){
+  if (i < 12) {
+    Matches3 <- merge(x = Matches3, y = Player3, by.x = paste0("home_player_", i), by.y = "player_api_id", all.x = TRUE)
+    colnames(Matches3)[which(names(Matches3) == "player_name")] <- paste0("player_name_", "H", i)
+    colnames(Matches3)[which(names(Matches3) == "rating")] <- paste0("rating_", "H", i)
+  } else {
+    Matches3 <- merge(x = Matches3, y = Player3, by.x = paste0("away_player_", i - 11), by.y = "player_api_id", all.x = TRUE)
+    colnames(Matches3)[which(names(Matches3) == "player_name")] <- paste0("player_name_", "A", i - 11)
+    colnames(Matches3)[which(names(Matches3) == "rating")] <- paste0("rating_", "A", i - 11)   
+  }
+}
+#view head of new df
+head(Matches3)
+```
+
+```{r}
+#re-order and filter down columns
+cols_to_keep <- c("Home_Team", "Away_Team", "League", "season", "stage", "Year", "date", "home_team_goal", "away_team_goal", "Result", "player_name_H1","rating_H1","player_name_H2", "rating_H2", "player_name_H3", "rating_H3", "player_name_H4", "rating_H4"      ,"player_name_H5", "rating_H5", "player_name_H6", "rating_H6",  "player_name_H7",  "rating_H7", "player_name_H8" , "rating_H8",     "player_name_H9", "rating_H9", "player_name_H10" ,"rating_H10", "player_name_H11", "rating_H11" , "player_name_A1", "rating_A1",     "player_name_A2",  "rating_A2", "player_name_A3",  "rating_A3",     "player_name_A4", "rating_A4",  "player_name_A5" , "rating_A5",      
+"player_name_A6", "rating_A6",  "player_name_A7", "rating_A7",   "player_name_A8",  "rating_A8", "player_name_A9" , "rating_A9",    "player_name_A10", "rating_A10", "player_name_A11","rating_A11" )
+Matches3 <- Matches3[, cols_to_keep]
+head(Matches3)
+```
+
+```{r}
+#home players rating list
+home_player_ratings <- c("rating_H1","rating_H2", "rating_H3", "rating_H4","rating_H5",  "rating_H6",   "rating_H7", "rating_H8", "rating_H9", "rating_H10", "rating_H11")
+#away players rating list
+away_player_ratings <- c("rating_A1","rating_A2", "rating_A3", "rating_A4","rating_A5",  "rating_A6",   "rating_A7", "rating_A8", "rating_A9", "rating_A10", "rating_A11")
+#home players list
+home_players <- c("player_name_H1","player_name_H2", "player_name_H3", "player_name_H4","player_name_H5",  "player_name_H6",   "player_name_H7", "player_name_H8", "player_name_H9", "player_name_H10", "player_name_H11")
+#away players ist
+away_players <- c("player_name_A1","player_name_A2", "player_name_A3", "player_name_A4","player_name_A5",  "player_name_A6",   "player_name_A7", "player_name_A8", "player_name_A9", "player_name_A10", "player_name_A11")
+#make column for home and away team overall player rating
+Matches3$HomeTeamRating <- round(rowMeans(subset(Matches3, select = home_player_ratings), na.rm = TRUE),1)
+Matches3$AwayTeamRating <- round(rowMeans(subset(Matches3, select = away_player_ratings), na.rm = TRUE),1)
+#view head of table
+head(Matches3, 10)
+```
+
+```{r}
+#should be 49856 rows (164 teams, 8 seasons, 38 games a season)
+num_teams <- length(unique(Matches3$Home_Team))
+num_seasons <- length(unique(Matches3$season))
+games_season <- length(unique(Matches3$stage))
+num_rows <- num_teams * num_seasons * games_season
+#make a dataframe with team, season, stage, and record
+Team_Record <- data.frame(rep(sort(unique(Matches3$Home_Team)), each = num_rows/num_teams), rep(rep(sort(unique(Matches3$season)), each = games_season), num_teams), rep(sort(unique(Matches3$stage)), num_rows/games_season))
+#do unique to ensure everything is unique, if not something is wrong
+Team_Record <- unique(Team_Record)
+cols <- c("Team", "Season", "Stage")
+colnames(Team_Record) <- cols
+#add an ID column to merge on
+Team_Record$id <- paste(Team_Record$Team,Team_Record$Season,Team_Record$Stage)
+
+head(Team_Record)
+```
+
+```{r}
+Matches3_sub <- Matches3 %>% select(Home_Team, Away_Team, season, stage, home_team_goal, away_team_goal, Result) %>% arrange(season, stage)
+#make a home team id and away team id in Matches3 to match on
+Matches3_sub$home_id <- paste(Matches3$Home_Team, Matches3$season, Matches3$stage)
+Matches3_sub$away_id <- paste(Matches3$Away_Team, Matches3$season, Matches3$stage)
+cols <- c("home_id", "away_id", "home_team_goal", "away_team_goal", "Result")
+Matches3_sub <- Matches3_sub[,cols]
+head(Matches3_sub)
+```
+
+```{r}
+#make function to match a team in Team Record to the result
+Team_Record <- merge(x = Team_Record, y = Matches3_sub[-2], by.x = "id", by.y = "home_id", all.x = TRUE)
+Team_Record <- merge(x = Team_Record, y = Matches3_sub[-1], by.x = "id", by.y = "away_id", all.x = TRUE)
+```
+
+```{r}
+#write Team_Record and Matches3_sub to excel for Vlookup
+write.csv(Team_Record, "Team_Record.csv")
+write.csv(Matches3_sub, "Matches3.csv")
+```
+
+```{r}
+#read in formatted df
+Team_Record <- read.csv('Team_Record_Formatted.csv')
+head(Team_Record)
+```
+
+```{r}
+#Convert Result to points
+Team_Record$GamePoints <- ifelse(Team_Record$Result == "W", 3, ifelse(Team_Record$Result == "L", 0, 1))
+
+#add in home wins, away wins, and total season wins for each team
+Team_Record <- Team_Record %>% group_by(Team, Season) %>% mutate(Season_Points = cumsum(GamePoints), TotalWins = sum(Result == "W"))
+head(Team_Record)
+```
+
+```{r}
+Wins <- 0
+#Calculate running total of wins
+for (i in 1:nrow(Team_Record)) {
+  if (Team_Record$Stage[i] == 1) {
+    if (Team_Record$Result[i] == "W") {
+      Wins[i] = 1
+    } else {
+      Wins[i] = 0
+    }
+  } else {
+    if (Team_Record$Result[i] == "W") {
+      Wins[i] = Wins[i - 1] + 1
+    } else {
+      Wins[i] = Wins[i - 1]
+    }
+  }
+}
+Team_Record <- data.frame(Team_Record, Wins)
+Team_Record$WinPctg <- round(Team_Record$Wins/Team_Record$Stage,2)
+head(Team_Record)
+```
+
+```{r}
+HomeWins <- 0
+#Calculate running total of wins
+for (i in 1:nrow(Team_Record)) {
+  if (Team_Record$Stage[i] == 1) {
+    if ((Team_Record$Result[i] == "W") & (Team_Record$HomeOrAway[i] == "Home")){
+      HomeWins[i] = 1
+    } else {
+      HomeWins[i] = 0
+    }
+  } else {
+    if ((Team_Record$Result[i] == "W") & (Team_Record$HomeOrAway[i] == "Home")) {
+      HomeWins[i] = HomeWins[i - 1] + 1
+    } else {
+      HomeWins[i] = HomeWins[i - 1]
+    }
+  }
+}
+
+Team_Record <- data.frame(Team_Record, HomeWins)
+head(Team_Record)
+```
+
+```{r}
+AwayWins <- 0
+#Calculate running total of wins
+for (i in 1:nrow(Team_Record)) {
+  if (Team_Record$Stage[i] == 1) {
+    if ((Team_Record$Result[i] == "W") & (Team_Record$HomeOrAway[i] == "Away")){
+      AwayWins[i] = 1
+    } else {
+      AwayWins[i] = 0
+    }
+  } else {
+    if ((Team_Record$Result[i] == "W") & (Team_Record$HomeOrAway[i] == "Away")) {
+      AwayWins[i] = AwayWins[i - 1] + 1
+    } else {
+      AwayWins[i] = AwayWins[i - 1]
+    }
+  }
+}
+
+Team_Record <- data.frame(Team_Record, AwayWins)
+head(Team_Record,10)
+```
+
+```{r}
+HomeGames <- 0
+#Calculate running total of home games so we can calculate home win %
+for (i in 1:nrow(Team_Record)) {
+  if (Team_Record$Stage[i] == 1) {
+    if (Team_Record$HomeOrAway[i] == "Home"){
+      HomeGames[i] = 1
+    } else {
+      HomeGames[i] = 0
+    }
+  } else {
+    if (Team_Record$HomeOrAway[i] == "Home") {
+      HomeGames[i] = HomeGames[i - 1] + 1
+    } else {
+      HomeGames[i] = HomeGames[i - 1]
+    }
+  }
+}
+
+Team_Record <- data.frame(Team_Record, HomeGames)
+Team_Record$HomeWinPctg <- round(Team_Record$HomeWins/Team_Record$HomeGames,2)
+head(Team_Record)
+```
+
+```{r}
+AwayGames <- 0
+#Calculate running total of home games so we can calculate home win %
+for (i in 1:nrow(Team_Record)) {
+  if (Team_Record$Stage[i] == 1) {
+    if (Team_Record$HomeOrAway[i] == "Away"){
+      AwayGames[i] = 1
+    } else {
+      AwayGames[i] = 0
+    }
+  } else {
+    if (Team_Record$HomeOrAway[i] == "Away") {
+      AwayGames[i] = AwayGames[i - 1] + 1
+    } else {
+      AwayGames[i] = AwayGames[i - 1]
+    }
+  }
+}
+
+Team_Record <- data.frame(Team_Record, AwayGames)
+Team_Record$AwayWinPctg <- round(Team_Record$AwayWins/Team_Record$AwayGames,2)
+head(Team_Record,10)
+```
+
+###Exploratory Data Analysis
+
+At what age do players peak?
+```{r}
+###need to filter this down to players who have gone through most of their career since this includes young players who have not peaked yet 
+top_ages <- Player2 %>% group_by(player_name) %>% summarise(top_age = max(age))
+
+#need to filter out player's who start in the dataset at old ages as well
+min_ages <- Player2 %>% group_by(player_name) %>% summarise(min_age = min(age))
+
+#make a dataframe with player's age when their overall_rating is at the max (note this can be multiple values since they can be at their top rating for multiple years)
+playerTopRatings <- Player2 %>% group_by(player_name, age) %>% summarise(overall_rating = max(overall_rating)) %>% mutate(top_rating = max(overall_rating)) %>% filter(overall_rating == top_rating) %>% select(-top_rating)
+
+#merge datasets
+playerTopRatings <- merge(x = playerTopRatings, y = top_ages, by = "player_name")
+playerTopRatings <- merge(x = playerTopRatings, y = min_ages, by = "player_name")
+
+#filter out players whose minimum age is less than 26
+playerTopRatings <- playerTopRatings %>% filter(min_age < 26)
+#filter out players whose maximum age is over 29
+playerTopRatings <- playerTopRatings %>% filter(top_age > 29)
+
+#nrow(playerTopRatings)
+ggplot(playerTopRatings, aes(x = age)) + geom_histogram(binwidth = 1, color = "black", fill = "green") + theme_bw() + labs(title = "At what age do players peak?", subtitle = "Note: Players filtered to those who had a mininum age less than 26 and maximum age over 29.") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Who are the best players in the game?
+```{r}
+#make a dataframe with player's age when their overall_rating is at the max (note this can be multiple values since they can be at their top rating for multiple years)
+playerTopRatings <- Player2 %>% group_by(player_name, age) %>% summarise(overall_rating = max(overall_rating)) %>% mutate(top_rating = max(overall_rating)) %>% filter(overall_rating == top_rating) %>% select(-top_rating)
+
+#remove duplicted player names
+playerTopRatings <- playerTopRatings[!duplicated(playerTopRatings$player_name), ]
+
+#order by rating
+playerTopRatings <- playerTopRatings %>% select(player_name, overall_rating) %>% arrange(desc(overall_rating))
+
+#select top 10 players
+playerTopRatings <- head(playerTopRatings, 10)
+#playerTopRatings
+
+#make a plot
+ggplot(playerTopRatings, aes(x = reorder(player_name, overall_rating), y = overall_rating)) + geom_bar(stat = "identity", aes(fill = overall_rating)) + geom_text(aes(label = overall_rating), hjust = 2) + xlab("Player Name") + ylab("Overall Rating") + ggtitle("Top Players in Europe") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip(ylim=c(80,100))
+```
+
+Average player rating by League
+```{r}
+#create new League Rating df
+LeagueRating <- Matches3 %>% select(League, season, rating_H1, rating_H2,rating_H3,rating_H4,rating_H5,rating_H6,rating_H7,rating_H8,rating_H9,rating_H10,rating_H11,rating_A1,rating_A2,rating_A3,rating_A4,rating_A5,rating_A6,rating_A7,rating_A8,rating_A9,rating_A10,rating_A11) %>% rowwise() %>% mutate(rowSum = sum(rating_H1, rating_H2,rating_H3,rating_H4,rating_H5,rating_H6,rating_H7,rating_H8,rating_H9,rating_H10,rating_H11,rating_A1,rating_A2,rating_A3,rating_A4,rating_A5,rating_A6,rating_A7,rating_A8,rating_A9,rating_A10,rating_A11, na.rm = TRUE))
+
+#find how many players in that row
+LeagueRating$Players <- rowSums(!is.na(LeagueRating[,3:24]))
+#can drop the rating cols now
+LeagueRating <- LeagueRating %>% select(League, season, rowSum, Players) %>% group_by(League, season) %>% summarise(Players = sum(Players), PlayerRating = sum(rowSum)) %>% mutate(averageRating = PlayerRating/Players) %>% select(League, season, averageRating)
+#convert league and season to factors
+LeagueRating$League <- as.factor(LeagueRating$League)
+LeagueRating$season <- as.integer(substr(LeagueRating$season,1,4))
+LeagueRating
+```
+
+```{r}
+#get League average player rating
+LeagueRating %>% group_by(League) %>% summarise(avgRating = mean(averageRating)) %>% arrange(desc(avgRating))
+```
+
+```{r}
+ggplot(LeagueRating, aes(x = season, y = averageRating)) + geom_line(aes(color = League), size = 2, alpha = 0.6) + ylab("Average Player Rating") + xlab("Season") + scale_x_continuous(breaks = c(2008,2009,2010,2011,2012,2013,2014,2015)) + ggtitle("League Player Ratings by Season") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Total home and away goals in each league.
+```{r}
+#make df with home goals and away goals summed by leage
+ha_goals <- Matches3 %>% group_by(League) %>% summarise(home_goals = sum(home_team_goal), away_goals = sum(away_team_goal))
+#reformat the data to be in long format for plotting
+ha_goals_melt <- melt(ha_goals, id = "League", value.name = "Goals")
+ha_goals_melt <- ha_goals_melt %>% rename("Location" = variable)
+ha_goals_melt
+```
+
+```{r}
+#Compare home goals to away goals
+(HAgoals <- ha_goals_melt %>% group_by(Location) %>% summarise(Goals = sum(Goals)))
+HAgoals$Goals[1]/HAgoals$Goals[2]
+```
+
+```{r}
+ggplot(ha_goals_melt, aes(x = reorder(League, Goals), y = Goals)) + geom_bar(aes(fill = Location), stat = "identity", position = "dodge") + ylab("Goals") + xlab("League") + ggtitle("Total Home and Away Goals by League") + theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + coord_flip()
+```
+
+Top teams for home and away goals.
+```{r}
+#make a dataset for home_goals
+hgoals <- Matches3 %>% select(Home_Team, home_team_goal) %>% group_by(Home_Team) %>% summarise(home_goals = sum(home_team_goal)) %>% arrange(desc(home_goals)) %>% top_n(20)
+#make a dataset for away_goals
+agoals <- Matches3 %>% select(Away_Team, away_team_goal) %>% group_by(Away_Team) %>% summarise(away_goals = sum(away_team_goal)) %>% arrange(desc(away_goals)) %>% top_n(20)
+```
+
+```{r}
+#make home goals ggplot
+gghgoals <- ggplot(hgoals, aes(x = reorder(Home_Team, home_goals), y = home_goals)) + geom_bar(stat="Identity", aes(fill=home_goals)) + xlab("Team") + ggtitle("Top Teams by Home Goals") + coord_flip() + theme(plot.title = element_text(hjust = 0.5), legend.position = "none", axis.text = element_text(size = 8), axis.title.x = element_text(size = 10), axis.title.y = element_text(size = 12))
+#make away goals ggplot
+ggagoals <- ggplot(agoals, aes(x = reorder(Away_Team, away_goals), y = away_goals)) + geom_bar(stat="Identity", aes(fill=away_goals)) + coord_flip() + ggtitle("Top Teams by Away Goals") + theme(plot.title = element_text(hjust = 0.5), legend.position = "none", axis.title.y = element_blank(), axis.text = element_text(size = 8), axis.title.x = element_text(size = 10))
+#plot them together side-by-side
+plot_grid(gghgoals, ggagoals)
+```
+
+Distribution of goals for the top 20 teams.
+```{r}
+hteams <- hgoals$Home_Team
+ateams <- agoals$Away_Team
+hgoals <- Matches3 %>% select(Home_Team, home_team_goal) %>% filter(Home_Team %in% hteams)
+agoals <- Matches3 %>% select(Away_Team, away_team_goal) %>% filter(Away_Team %in% ateams)
+```
+
+```{r}
+#home goals ggplot
+gghgoals <- ggplot(hgoals, aes(x = reorder(Home_Team, home_team_goal), y = home_team_goal)) + geom_boxplot(fill = "green", position = "dodge", alpha = .6) + xlab("Home Team") + ylab("Goals") + ggtitle("Distribution of Home Goals") + scale_y_continuous(breaks = c(0,1,2,3,4,5,6,7,8,9,10)) + coord_flip() + theme(plot.title = element_text(hjust = 0.5), legend.position = "none", axis.title.y = element_blank(), axis.text = element_text(size = 8), axis.title.x = element_text(size = 10))
+#away goals ggplot
+ggagoals <- ggplot(agoals, aes(x = reorder(Away_Team, away_team_goal), y = away_team_goal)) + geom_boxplot(fill = "green", position = "dodge", alpha = .6) + xlab("Away Team") + ylab("Goals") + ggtitle("Distribution of Away Goals") + scale_y_continuous(breaks = c(0,1,2,3,4,5,6,7,8,9)) + coord_flip() + theme(plot.title = element_text(hjust = 0.5), legend.position = "none", axis.title.y = element_blank(), axis.text = element_text(size = 8), axis.title.x = element_text(size = 10))
+#plot them together side-by-side
+plot_grid(gghgoals, ggagoals)
+```
+
+Distribution of home and away goals.
+```{r}
+#make a stacked df for home and away goals
+ha_goal_dist <- Matches3 %>% select(Home_Team, home_team_goal, away_team_goal)
+ha_goal_dist <- melt(ha_goal_dist, id = "Home_Team", value.name = "Goals")
+ha_goal_dist <- ha_goal_dist %>% rename("Location" = variable)
+#make overlapped histogram of home vs. away goals
+ggplot(ha_goal_dist, aes(x = Goals)) + 
+  
+  geom_histogram(data = subset(ha_goal_dist, Location == "home_team_goal"), aes(fill = Location), alpha = 0.3, binwidth = 1) + 
+  
+  geom_histogram(data = subset(ha_goal_dist, Location == "away_team_goal"), aes(fill = Location), alpha = 0.3, binwidth = 1) +
+  
+  scale_fill_manual(name = "Location", values = c("red", "blue"), labels = c("Away", "Home")) +
+  ggtitle("Distribution of Home and Away Goals") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = c(0,1,2,3,4,5,6,7,8,9,10))
+```
+
+###Analysis
+
+####Association Rule Mining
+Questions:
+1. What playing styles lead to more wins?
+2. What playing styles lead to more goals scored?
+3. What playing styles lead to less goals conceded?
+
+```{r}
+#compile team stats (goals scored, goals conceded, total wins, total losses, total ties, and team attributes)
+Team_Stats_Home <- Matches3 %>% select(Home_Team, home_team_goal, away_team_goal) %>% group_by(Home_Team) %>% summarise(home_goals_scored = sum(home_team_goal), home_goals_conceded = sum(away_team_goal))
+Team_Stats_Away <- Matches3 %>% select(Away_Team, home_team_goal, away_team_goal) %>% group_by(Away_Team) %>% summarise(away_goals_scored = sum(away_team_goal), away_goals_conceded = sum(home_team_goal))
+head(Team_Stats_Away)
+```
+
+```{r}
+#make a table with Home Wins
+Home_Wins <- Matches3 %>% select(Home_Team, Result) %>% filter(Result == "W") %>% group_by(Home_Team) %>% summarize(HomeWins = n())
+#make a table with Away Wins (a home loss means an away win)
+Away_Wins <- Matches3 %>% select(Away_Team, Result) %>% filter(Result == "L") %>% group_by(Away_Team) %>% summarize(AwayWins = n())
+head(Away_Wins)
+```
+
+```{r}
+#make a table for number of games played (not all teams play same number of games with teams getting relegated). Should have equal number of home and away games though
+GP <- Matches3 %>% select(Home_Team, Result) %>% group_by(Home_Team) %>% summarise(Games = n())
+head(GP)
+```
+
+```{r}
+#merge the tables created
+Team_Stats <- merge(x = Team_Stats_Home, y = Team_Stats_Away, by.x = "Home_Team", by.y = "Away_Team")
+Team_Stats <- merge(x = Team_Stats, y = Home_Wins, by = "Home_Team")
+Team_Stats <- merge(x = Team_Stats, y = Away_Wins, by.x = "Home_Team", by.y = "Away_Team")
+Team_Stats <- merge(x = Team_Stats, y = GP, by = "Home_Team")
+head(Team_Stats)
+```
+
+```{r}
+#make summary statistics with averages
+Team_Stats$AwayGames <- Team_Stats$Games
+Team_Stats$HomeGames <- Team_Stats$Games
+Team_Stats$Games <- Team_Stats$Games * 2
+Team_Stats$TotalWins <- Team_Stats$HomeWins + Team_Stats$AwayWins
+Team_Stats$TotalGoalsScored <- Team_Stats$home_goals_scored + Team_Stats$away_goals_scored
+Team_Stats$TotalGoalsConceded <- Team_Stats$home_goals_conceded + Team_Stats$away_goals_conceded
+Team_Stats$WinPctg <- round(Team_Stats$TotalWins/Team_Stats$Games,2)
+Team_Stats$HomeWinPctg <- round(Team_Stats$HomeWins/Team_Stats$HomeGames,2)
+Team_Stats$AwayWinPctg <- round(Team_Stats$AwayWins/Team_Stats$AwayGames,2)
+Team_Stats$GS_PG <- round(Team_Stats$TotalGoalsScored/Team_Stats$Games,2)
+Team_Stats$HomeGS_PG <- round(Team_Stats$home_goals_scored/Team_Stats$HomeGames,2)
+Team_Stats$AwayGS_PG <- round(Team_Stats$away_goals_scored/Team_Stats$AwayGames,2)
+Team_Stats$GC_PG <- round(Team_Stats$TotalGoalsConceded/Team_Stats$Games,2)
+Team_Stats$HomeGC_PG <- round(Team_Stats$home_goals_conceded/Team_Stats$HomeGames,2)
+Team_Stats$AwayGC_PG <- round(Team_Stats$away_goals_conceded/Team_Stats$AwayGames,2)
+head(Team_Stats)
+```
+
+```{r}
+#remove unneeded total statistics (just want the averages to remove affect of games played)
+Team_Stats$Team <- Team_Stats$Home_Team
+cols_to_keep <- c("Team","WinPctg", "HomeWinPctg", "AwayWinPctg", "GS_PG", "HomeGS_PG", "AwayGS_PG", "GC_PG", "HomeGC_PG", "AwayGC_PG")
+Team_Stats <- Team_Stats[,cols_to_keep]
+head(Team_Stats)
+```
+
+```{r}
+#merge with Team_Attributes_Cat
+Team_Stats <- merge(x = Team_Stats, y = Team_Attributes_Cat, by = "Team")
+Team_Stats %>% arrange(desc(WinPctg)) %>% top_n(10)
+```
+
+```{r}
+#going to remove Home/Away stats to simplify. Can also get rid of Team
+cols_to_keep <- c("GS_PG", "GC_PG","buildUpPlaySpeed", "buildUpPlayDribbling", "buildUpPlayPassing","buildUpPlayPositioning",  "chanceCreationPassing" ,"chanceCreationCrossing" ,"chanceCreationShooting", "chanceCreationPositioning", "defencePressure", "defenceAggression", "defenceTeamWidth" , "defenceDefenderLine")  
+Team_Stats_Cat <- Team_Stats[,cols_to_keep]
+
+#discretizing the continuous variables
+#Team_Stats_Cat$WinPctg <- arules::discretize(Team_Stats_Cat$WinPctg, method = "interval", breaks = 4, labels = c("very low", "low", "high", "very high")) 
+Team_Stats_Cat$GS_PG <- arules::discretize(Team_Stats_Cat$GS_PG, method = "interval", breaks = 4, labels = c("very low", "low", "high", "very high")) 
+Team_Stats_Cat$GC_PG <- arules::discretize(Team_Stats_Cat$GC_PG, method = "interval", breaks = 4, labels = c("very low", "low","high", "very high")) 
+
+#convert the character variables to factors
+Team_Stats_Cat$buildUpPlaySpeed <- as.factor(Team_Stats_Cat$buildUpPlaySpeed)
+Team_Stats_Cat$buildUpPlayDribbling <- as.factor(Team_Stats_Cat$buildUpPlayDribbling)
+Team_Stats_Cat$buildUpPlayPassing <- as.factor(Team_Stats_Cat$buildUpPlayPassing)
+Team_Stats_Cat$buildUpPlayPositioning <- as.factor(Team_Stats_Cat$buildUpPlayPositioning)
+Team_Stats_Cat$chanceCreationPassing <- as.factor(Team_Stats_Cat$chanceCreationPassing)
+Team_Stats_Cat$chanceCreationCrossing <- as.factor(Team_Stats_Cat$chanceCreationCrossing)
+Team_Stats_Cat$chanceCreationShooting <- as.factor(Team_Stats_Cat$chanceCreationShooting)
+Team_Stats_Cat$chanceCreationPositioning <- as.factor(Team_Stats_Cat$chanceCreationPositioning)
+Team_Stats_Cat$defencePressure <- as.factor(Team_Stats_Cat$defencePressure)
+Team_Stats_Cat$defenceAggression <- as.factor(Team_Stats_Cat$defenceAggression)
+Team_Stats_Cat$defenceTeamWidth <- as.factor(Team_Stats_Cat$defenceTeamWidth)
+Team_Stats_Cat$defenceDefenderLine <- as.factor(Team_Stats_Cat$defenceDefenderLine)
+
+head(Team_Stats_Cat)
+```
+
+```{r}
+table(Team_Stats_Cat$WinPctg)
+```
+
+```{r}
+table(Team_Stats_Cat$GS_PG)
+```
+
+```{r}
+table(Team_Stats_Cat$GC_PG)
+```
+
+```{r}
+#get the rules with default parameters
+rules1 <-apriori(Team_Stats_Cat)
+
+#sort rules by confidence
+rules1 <- sort(rules1, by="confidence", decreasing = TRUE)
+
+#show the top 10 rules, but only 2 digits
+options(digits = 2)
+inspect(rules1[1:10])
+```
+
+```{r}
+#sort rules by lift
+rules1 <- sort(rules1, by="lift", decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+inspect(rules1[1:5])
+```
+
+```{r}
+#understand the distribution of support, confidence, and lift
+summary(rules1)
+```
+
+```{r}
+#get the rules with adjusted parameters.
+rules2 <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.95, maxlen=3))
+
+#sort rules by confidence
+rules2 <- sort(rules2, by= c("confidence", "support"), decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+inspect(rules2[1:5])
+```
+
+
+```{r}
+#sort rules by lift
+rules2 <- sort(rules2, by=c("lift", "support"), decreasing = TRUE)
+
+#show the top 10 rules, but only 2 digits
+options(digits = 2)
+inspect(rules2[1:10])
+```
+
+```{r}
+plot(rules2[1:20], method = 'graph')
+```
+
+```{r}
+#find rules that lead to high win pctg
+win_rules <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.8, maxlen=5), appearance = list(default="lhs",rhs="WinPctg=high"),control = list(verbose=F))
+
+#sort rules by confidence
+win_rules <- sort(win_rules, by= c("confidence", "support"), decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+win_rules
+```
+
+```{r}
+#find rules that lead to high goals scored per game
+goal_rules <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.8, maxlen=4), appearance = list(default="lhs",rhs="GS_PG=high"),control = list(verbose=F))
+
+#sort rules by confidence
+goal_rules <- sort(goal_rules, by= c("confidence", "support"), decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+goal_rules
+```
+
+```{r}
+#find rules that lead to low goals conceded per game
+defense_rules <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.8, maxlen=4), appearance = list(default="lhs",rhs="GC_PG=very low"),control = list(verbose=F))
+
+#sort rules by confidence
+defense_rules <- sort(defense_rules, by= c("confidence", "support"), decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+defense_rules
+```
+
+```{r}
+#find rules that are a result of high win pctg
+win_rules2 <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.8, maxlen=5, minlen = 2), appearance = list(default="rhs",lhs="WinPctg=high"),control = list(verbose=F))
+
+#sort rules by lift confidence
+win_rules <- sort(win_rules2, by= c("lift", "confidence"), decreasing = TRUE)
+
+#show the top 10 rules, but only 2 digits
+options(digits = 2)
+inspect(win_rules2[1:7])
+```
+
+```{r}
+#find rules are a result of high goals scored per game
+goal_rules2 <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.8, maxlen=4, minlen = 2), appearance = list(default="rhs",lhs="GS_PG=very high"),control = list(verbose=F))
+
+#sort rules by confidence
+goal_rules2 <- sort(goal_rules2, by= c("confidence", "support"), decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+goal_rules2
+```
+
+```{r}
+#find rules that are a result of low goals conceded per game
+defense_rules2 <-apriori(Team_Stats_Cat, parameter = list(supp = 0.1, conf = 0.8, maxlen=4, minlen = 2), appearance = list(default="rhs",lhs="GC_PG=very low"),control = list(verbose=F))
+
+#sort rules by confidence
+defense_rules2 <- sort(defense_rules2, by= c("confidence", "support"), decreasing = TRUE)
+
+#show the top 5 rules, but only 2 digits
+options(digits = 2)
+inspect(defense_rules2[1:7])
+```
+
+####Random Forest- What attributes have the largest effect on rating?
+
+```{r}
+#filter down dataset, only look at field players (remove gk attributes)
+df <- Player2 %>% select(-ID, -potential, -player_api_id, -Year, -date, -birthday, -gk_diving, -gk_handling, -gk_kicking, -gk_positioning, -gk_reflexes, -attacking_work_rate, -preferred_foot, -defensive_work_rate)
+#remove goalkeepers from dataset
+goalkeepers <- unique(Matches3$player_name_H1)
+df <- df %>% filter(!player_name %in% goalkeepers)
+#only keep rows with complete cases
+df <- df[complete.cases(df),]
+#can remove player_name now
+df <- df %>% select(-player_name)
+head(df)
+```
+
+```{r}
+#make Random Forest model
+rf1 <- randomForest(overall_rating ~ ., data = df, importance = TRUE)
+#find importance
+rfImp <- data.frame(importance(rf1))
+rfImp <- add_rownames(rfImp, "Variable")
+rfImp %>% arrange(-X.IncMSE)
+```
+
+```{r}
+varImpPlot(rf1, type = 1)
+```
+
+```{r}
+#remove age and run again
+df <- df %>% select(-age)
+#make Random Forest model
+rf2 <- randomForest(overall_rating ~ ., data = df, importance = TRUE)
+#find importance
+rfImp <- data.frame(importance(rf2))
+rfImp <- add_rownames(rfImp, "Variable")
+rfImp %>% arrange(-X.IncMSE)
+```
+
+```{r}
+varImpPlot(rf2, type = 1)
+```
+
+```{r}
+#try to confirm results with a linear regression model
+lm1 <- lm(overall_rating ~ ., data = df)
+#find importance
+lmImp <- data.frame(varImp(lm1, scale = FALSE))
+lmImp <- add_rownames(lmImp, "Variable")
+lmImp %>% arrange(-Overall)
+```
+
+```{r}
+#look at linear model coefficients
+lmCoef <- data.frame(lm1$coefficients)
+lmCoef <- add_rownames(lmCoef, "Variable")
+lmCoef %>% arrange(-lm1.coefficients)
+```
+
+####Clustering Analysis - Grouping Teams by Playing Style
+
+```{r}
+#merge with Team df to get team name
+Team_Attributes2 <- merge(x = Team_Attributes, y = Team2, by = "team_api_id")
+#remove id columns and change a column name
+Team_Attributes2 <- Team_Attributes2 %>% select(-team_api_id, -id, -team_fifa_api_id) %>% rename("Team" = team_long_name)
+#filter to just team in Matches3 dataset
+teams_of_interest <- unique(Matches3$Home_Team)
+Team_Attributes2 <- Team_Attributes2[Team_Attributes2$Team %in% teams_of_interest,]
+#merge to get league information
+TeamLeague <- unique(Matches3[,c("Home_Team", "League")])
+TeamLeague <- TeamLeague %>% rename(Team = "Home_Team")
+Team_Attributes2 <- merge(x = Team_Attributes2, y = TeamLeague, by = "Team")
+#change date to a year column
+Team_Attributes2 <- Team_Attributes2 %>% mutate(Year = substr(date,0,4))
+#re-arrange columns
+cols <- c("Team", "League", "Year", "buildUpPlaySpeed", "buildUpPlaySpeedClass","buildUpPlayDribbling", "buildUpPlayDribblingClass","buildUpPlayPassing", "buildUpPlayPassingClass", "buildUpPlayPositioningClass", "chanceCreationPassing", "chanceCreationPassingClass","chanceCreationCrossing" ,"chanceCreationCrossingClass", "chanceCreationShooting","chanceCreationShootingClass" ,"chanceCreationPositioningClass","defencePressure" ,"defencePressureClass" ,"defenceAggression", "defenceAggressionClass","defenceTeamWidth","defenceTeamWidthClass", "defenceDefenderLineClass")
+Team_Attributes2 <- Team_Attributes2[,cols]
+
+head(Team_Attributes2, 10)
+```
+
+```{r}
+#make a function to calculate the mode of categorical variable
+calculate_mode <- function(x) {
+  uniqx <- unique(x)
+  uniqx[which.max(tabulate(match(x, uniqx)))]
+}
+#summarize team attributes to the average of numeric values
+Team_Attributes_Num <- Team_Attributes2 %>% group_by(Team, League) %>% summarise(buildUpPlaySpeed = round(mean(buildUpPlaySpeed, na.rm = TRUE),1), buildUpPlayPassing = round(mean(buildUpPlayPassing, na.rm = TRUE),1), chanceCreationPassing = round(mean(chanceCreationPassing, na.rm = TRUE),1), chanceCreationShooting = round(mean(chanceCreationShooting, na.rm = TRUE),1), defencePressure = round(mean(defencePressure, na.rm = TRUE),1), defenceAggression = round(mean(defenceAggression, na.rm = TRUE),1), defenceTeamWidth = round(mean(defenceTeamWidth, na.rm = TRUE),1))
+
+#summarize team attributes to the mode of categorical values
+Team_Attributes_Cat <- Team_Attributes2 %>% group_by(Team, League) %>% summarise(buildUpPlaySpeed = calculate_mode(buildUpPlaySpeedClass), buildUpPlayDribbling = calculate_mode(buildUpPlayDribblingClass), buildUpPlayPassing = calculate_mode(buildUpPlayPassingClass), buildUpPlayPositioning = calculate_mode(buildUpPlayPositioningClass), chanceCreationPassing = calculate_mode(chanceCreationPassingClass), chanceCreationCrossing = calculate_mode(chanceCreationCrossingClass), chanceCreationShooting = calculate_mode(chanceCreationShootingClass), chanceCreationPositioning = calculate_mode(chanceCreationPositioningClass), defencePressure = calculate_mode(defencePressureClass), defenceAggression = calculate_mode(defenceAggressionClass), defenceTeamWidth = calculate_mode(defenceTeamWidthClass), defenceDefenderLine = calculate_mode(defenceDefenderLineClass))
+
+head(Team_Attributes_Num)
+```
+
+Visualize the differences in average playing style in the different leagues to get some intuitions before clustering. 
+```{r}
+#group by League
+League_Attributes <- Team_Attributes_Num %>% select(-Team) %>% group_by(League) %>% summarise(buildUpPlaySpeed = round(mean(buildUpPlaySpeed, na.rm = TRUE),1), buildUpPlayPassing = round(mean(buildUpPlayPassing, na.rm = TRUE),1), chanceCreationPassing = round(mean(chanceCreationPassing, na.rm = TRUE),1), chanceCreationShooting = round(mean(chanceCreationShooting, na.rm = TRUE),1), defencePressure = round(mean(defencePressure, na.rm = TRUE),1), defenceAggression = round(mean(defenceAggression, na.rm = TRUE),1), defenceTeamWidth = round(mean(defenceTeamWidth, na.rm = TRUE),1))
+
+#reshape the table for easier plotting
+League_Attributes <- gather(League_Attributes, attribute, value, buildUpPlaySpeed:defenceTeamWidth)
+
+#plot a bar graph of attributes by league
+ggplot(League_Attributes, aes(x = reorder(attribute, value), y = value)) + geom_bar(stat = "identity", position = position_dodge(), aes(fill = League)) + ggtitle("Team Attributes by League") + xlab("Team Attributes") + scale_y_continuous(breaks = c(0,10,20,30,40,50,60), limits = c(0,60)) + theme(plot.title = element_text(hjust = 0.5), legend.text = element_text(size = 8), axis.title.y = element_blank(), axis.text.y = element_text(size = 10), axis.text.x = element_text(angle = 45, hjust = 1, size = 8), axis.title.x = element_text(size = 10))
+```
+
+```{r}
+#reshape the table for easier plotting
+Team_Attributes_Num_Long <- gather(Team_Attributes_Num, attribute, value, buildUpPlaySpeed:defenceTeamWidth)
+#head(Team_Attributes_Num_Long)
+
+#plot a bar graph of attributes by league
+ggplot(Team_Attributes_Num_Long, aes(x = attribute, y = value)) + geom_boxplot(aes(fill = League), position = position_dodge()) + ggtitle("Team Attributes by League") + xlab("Team Attributes") + scale_y_continuous(breaks = c(30,40,50,60), limits = c(25,65)) + theme(plot.title = element_text(hjust = 0.5), legend.text = element_text(size = 8), axis.title.y = element_blank(), axis.text.y = element_text(size = 10), axis.text.x = element_text(angle = 45, hjust = 1, size = 8), axis.title.x = element_text(size = 10))
+```
+
+```{r}
+#choose a k
+k = 4
+
+#run kmeanModel
+(kmeansModel1 <- kmeans(Team_Attributes_Num[,3:ncol(Team_Attributes_Num)], k))
+```
+
+```{r}
+##Get the clusters that were assigned to each group
+clusterGroups1 <- data.frame(Team_Attributes_Num,kmeansModel1$cluster)
+
+#count how many of each cluster are in each league
+df <- clusterGroups1 %>% select(Team, League, kmeansModel1.cluster) %>% group_by(League) %>% count(kmeansModel1.cluster)
+colnames(df) <- c("League", "Cluster", "Count")
+df$Cluster <- as.factor(df$Cluster)
+
+#ggplot
+ggplot(df, aes(x = League, y = Count)) + geom_bar(aes(fill = Cluster), position = "dodge", stat = "identity") + ggtitle("Playing Clusters by League") + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(size = 10))
+```
+
+```{r}
+head(df)
+```
+
+```{r}
+kmeansModel1$cluster <- factor(kmeansModel1$cluster)
+autoplot(kmeansModel1, data = clusterGroups1, colour = 'kmeansModel1.cluster', shape = 'League', loadings = TRUE, loadings.label = TRUE)
+```
+
+```{r}
+#choose a k
+k = 3
+
+#run kmeanModel
+(kmeansModel2 <- kmeans(Team_Attributes_Num[,3:ncol(Team_Attributes_Num)], k))
+```
+
+```{r}
+##Get the clusters that were assigned to each group
+clusterGroups2 <- data.frame(Team_Attributes_Num,kmeansModel2$cluster)
+
+#count how many of each cluster are in each league
+df <- clusterGroups2 %>% select(Team, League, kmeansModel2.cluster) %>% group_by(League) %>% count(kmeansModel2.cluster)
+colnames(df) <- c("League", "Cluster", "Count")
+df$Cluster <- as.factor(df$Cluster)
+
+#ggplot
+ggplot(df, aes(x = League, y = Count)) + geom_bar(aes(fill = Cluster), position = "dodge", stat = "identity") + ggtitle("Playing Clusters by League") + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(size = 10))
+```
+
+```{r}
+autoplot(kmeansModel2, data = clusterGroups2, colour = 'kmeansModel2.cluster', shape = 'League', loadings = TRUE, loadings.label = TRUE)
+```
+
+```{r}
+#choose a k
+k = 2
+
+#run kmeanModel
+(kmeansModel3 <- kmeans(Team_Attributes_Num[,3:ncol(Team_Attributes_Num)], k))
+```
+
+```{r}
+##Get the clusters that were assigned to each group
+clusterGroups3 <- data.frame(Team_Attributes_Num,kmeansModel3$cluster)
+
+#count how many of each cluster are in each league
+df <- clusterGroups3 %>% select(Team, League, kmeansModel3.cluster) %>% group_by(League) %>% count(kmeansModel3.cluster)
+colnames(df) <- c("League", "Cluster", "Count")
+df$Cluster <- as.factor(df$Cluster)
+
+#ggplot
+ggplot(df, aes(x = League, y = Count)) + geom_bar(aes(fill = Cluster), position = "dodge", stat = "identity") + ggtitle("Playing Clusters by League") + theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(size = 10))
+```
+
+####Predict match results 
+
+```{r}
+#filter down columns needed for prediction
+cols_to_keep <- c("Home_Team","Away_Team","season","stage","Year", "Result","HomeTeamRating","AwayTeamRating")
+Matches3_sub <- Matches3[,cols_to_keep]
+```
+
+```{r}
+#Create tables to merge with that contain Home and Away win percentage
+Team_Record_Home_Wins <- Team_Record %>% select(Team, Season, Stage, HomeWinPctg)
+Team_Record_Away_Wins <- Team_Record %>% select(Team, Season, Stage, AwayWinPctg)
+head(Team_Record_Away_Wins)
+```
+
+```{r}
+#merge matches df with Team_Record tables with win percentages
+Matches3_sub <- merge(Matches3_sub, Team_Record_Home_Wins, by.x = c("Home_Team", "season", "stage"), by.y = c("Team", "Season", "Stage"))
+Matches3_sub <- merge(Matches3_sub, Team_Record_Away_Wins, by.x = c("Away_Team", "season", "stage"), by.y = c("Team", "Season", "Stage"))
+#organize table and only choose columns needed
+MatchPredDF <- Matches3_sub %>% select(Result, HomeTeamRating, AwayTeamRating, HomeWinPctg, AwayWinPctg)
+MatchPredDF <- MatchPredDF[complete.cases(MatchPredDF),]
+#convert Result to an ordered factor variable
+MatchPredDF$Result <- factor(MatchPredDF$Result, levels = c("L", "T", "W"))
+rownames(MatchPredDF) <- NULL
+head(MatchPredDF)
+```
+
+```{r}
+correlations <- cor(MatchPredDF[,2:5])
+corrplot(correlations, method = "circle")
+```
+
+```{r}
+#split into train and test set
+sample <- sample.split(MatchPredDF,SplitRatio = .9)
+train <- subset(MatchPredDF, sample == TRUE)
+test <- subset(MatchPredDF, sample == FALSE)
+```
+
+```{r}
+#create test labels
+test_labels <- factor(test$Result, levels = c("L", "T", "W"))
+```
+
+
+```{r}
+sort(table(MatchPredDF$Result), decreasing = T)
+```
+
+```{r}
+sum(MatchPredDF$Result == "W")/nrow(MatchPredDF)
+```
+
+#####Match Prediction - Random Forest
+```{r}
+#use default parameters to made a model
+rf_m1 <- randomForest(Result ~ ., data = train)
+p1 <- predict(rf_m1, test[-1], type = "response")
+confusionMatrix(p1, test_labels)
+```
+
+```{r}
+#train random forest parameters
+ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+grid_rf <- expand.grid(.mtry = c(2,4))
+rf_m2 <- train(Result ~ ., data = train, method = "rf", metric = "Kappa", trControl = ctrl, tuneGrid = grid_rf)
+rf_m2
+```
+
+```{r}
+#random forest to get probabilities for each class
+rf_m3 <- randomForest(Result ~ ., data = train, importance = TRUE, type = "classification")
+p3 <- predict(rf_m3, test[-1], type = "response")
+confusionMatrix(p3, test_labels)
+```
+
+#####Match Prediction - Naive Bayes
+```{r}
+#convert MatchPredDF to categorical data
+MatchPredDF_Cat <- MatchPredDF
+MatchPredDF_Cat$HomeTeamRating <- arules::discretize(MatchPredDF_Cat$HomeTeamRating, method = "interval", breaks = 4, labels = c("very low", "low", "high", "very high")) 
+MatchPredDF_Cat$AwayTeamRating <- arules::discretize(MatchPredDF_Cat$AwayTeamRating, method = "interval", breaks = 4, labels = c("very low", "low", "high", "very high")) 
+MatchPredDF_Cat$HomeWinPctg <- arules::discretize(MatchPredDF_Cat$HomeWinPctg, method = "interval", breaks = 4, labels = c("very low", "low", "high", "very high")) 
+MatchPredDF_Cat$AwayWinPctg <- arules::discretize(MatchPredDF_Cat$AwayWinPctg, method = "interval", breaks = 4, labels = c("very low", "low", "high", "very high")) 
+```
+
+```{r}
+#naive bayes with default parameters
+nb_m1 <- naiveBayes(train[-1], train$Result)
+p1 <- predict(nb_m1, test[-1])
+confusionMatrix(p1, test_labels)
+```
+
+```{r}
+#naive bayes with default parameters
+nb_m2 <- naiveBayes(train[-1], train$Result, laplace = 1)
+p2 <- predict(nb_m2, test[-1])
+confusionMatrix(p2, test_labels)
+```
+
+#####Match Prediction - SVM
+
+```{r}
+#buiid an SVM model with linear kernel
+svm_m1 <- ksvm(Result ~ ., data = train, kernel = "vanilladot")
+p1 <- predict(svm_m1, test[-1], type = "response")
+confusionMatrix(p1, test_labels)
+```
+
+```{r}
+#buiid an SVM model with radial kernel
+svm_m2 <- ksvm(Result ~ ., data = train, kernel = "rbfdot")
+p2 <- predict(svm_m2, test[-1], type = "response")
+confusionMatrix(p2, test_labels)
+```
+
+```{r}
+#buiid an SVM model with radial kernel
+svm_m2.5 <- ksvm(Result ~ ., data = train, kernel = "rbfdot", C = 5)
+p2.5 <- predict(svm_m2.5, test[-1], type = "response")
+confusionMatrix(p2.5, test_labels)
+```
+
+```{r}
+#buiid an SVM model with radial kernel
+svm_m2.10 <- ksvm(Result ~ ., data = train, kernel = "rbfdot", C = 10)
+p2.10 <- predict(svm_m2.10, test[-1], type = "response")
+confusionMatrix(p2.10, test_labels)
+```
+
+```{r}
+#buiid an SVM model with radial kernel
+svm_m2.50 <- ksvm(Result ~ ., data = train, kernel = "rbfdot", C = 50)
+p2.50 <- predict(svm_m2.50, test[-1], type = "response")
+confusionMatrix(p2.50, test_labels)
+```
+
+```{r}
+#buiid an SVM model with polynomial kernel
+svm_m3 <- ksvm(Result ~ ., data = train, kernel = "polydot")
+p3 <- predict(svm_m3, test[-1], type = "response")
+confusionMatrix(p3, test_labels)
+```
