@@ -1,0 +1,2 @@
+# SyracusePortfolio
+Students will choose assignments and projects worked on in courses during their studies, which reflect abilities specified in the program learning outcomes, for inclusion in their personal portfolio.  A panel of faculty who teach the courses included in th e program will review the portfolios of graduates during the students’ final term.  The panel will approve the portfolio for each student as a transcript milestone required for the degree. 
